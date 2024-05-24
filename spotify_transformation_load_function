@@ -1,0 +1,153 @@
+import json
+import os
+import boto3
+from datetime import datetime
+import pandas as pd
+
+def lambda_handler(event, context):
+    s3_client = boto3.client("s3")
+    source_bucket = "sporify-etl-project-bhanuchandan"
+    source_prefix = "raw_data/to_processed/"
+    processed_prefix = "raw_data/processed/"
+    destination_bucket = "sporify-etl-project-bhanuchandan"
+    destination_album_prefix = "transformed_data/album_data/"
+    destination_artist_prefix = "transformed_data/artist_data/"
+    destination_song_prefix = "transformed_data/songs_data/"
+    
+    try:
+        # List objects in the source prefix
+        response = s3_client.list_objects_v2(Bucket=source_bucket, Prefix=source_prefix)
+        print(f"List objects response: {response}")
+        
+        if 'Contents' in response:
+            for obj in response['Contents']:
+                source_key = obj['Key']
+                if source_key == source_prefix:
+                    continue  # Skip the directory itself
+                print(f"Processing file: {source_key}")
+                
+                # Get the object data
+                file_obj = s3_client.get_object(Bucket=source_bucket, Key=source_key)
+                file_content = file_obj['Body'].read().decode('utf-8')
+                print(f"File content: {file_content[:100]}")  # Log the first 100 characters
+                
+                # Check if the file content is empty
+                if not file_content:
+                    print(f"File {source_key} is empty.")
+                    continue
+
+                try:
+                    raw_data = json.loads(file_content)
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON from file {source_key}: {str(e)}")
+                    continue
+                
+                # Transformation steps
+                album_list = []
+                artist_list = []
+                song_list = []
+
+                for row in raw_data["items"]:
+                    # Album data
+                    album_id = row["track"]["album"]["id"]
+                    album_name = row["track"]["album"]["name"]
+                    album_release_date = row["track"]["album"]["release_date"]
+                    album_total_tracks = row["track"]["album"]["total_tracks"]
+                    album_external_links = row["track"]["album"]["external_urls"]["spotify"]
+                    album_element = {
+                        'album_id': album_id, 
+                        "album_name": album_name, 
+                        "album_release_date": album_release_date, 
+                        "album_total_tracks": album_total_tracks, 
+                        "url": album_external_links
+                    }
+                    album_list.append(album_element)
+                    
+                    # Artist data
+                    for artist in row["track"]["album"]["artists"]:
+                        artist_dict = {
+                            "artist_id": artist["id"], 
+                            "artist_name": artist["name"], 
+                            "external_url": artist["href"]
+                        }
+                        artist_list.append(artist_dict)
+                    
+                    # Song data
+                    song_id = row["track"]["id"]
+                    song_name = row["track"]["name"]
+                    song_duration = row["track"]["duration_ms"]
+                    song_url = row["track"]["external_urls"]["spotify"]
+                    song_popularity = row["track"]["popularity"]
+                    song_added = row["added_at"]
+                    album_id = row["track"]["album"]["id"]
+                    artist_id = row["track"]["album"]["artists"][0]["id"]
+                    song_element = {
+                        'song_id': song_id, 
+                        "song_name": song_name, 
+                        "duration_ms": song_duration, 
+                        "url": song_url,
+                        "popularity": song_popularity,
+                        "added_at": song_added, 
+                        "album_id": album_id,  
+                        "artist_id": artist_id
+                    }
+                    song_list.append(song_element)
+                
+                # Creating DataFrames from lists
+                album_df = pd.DataFrame.from_dict(album_list)
+                artist_df = pd.DataFrame.from_dict(artist_list)
+                song_df = pd.DataFrame.from_dict(song_list)
+                
+                # Drop duplicates in album and artist DataFrames
+                album_df = album_df.drop_duplicates(subset=["album_id"])
+                artist_df = artist_df.drop_duplicates(subset=["artist_id"])
+                
+                # Convert date columns to datetime
+                album_df["album_release_date"] = pd.to_datetime(album_df["album_release_date"])
+                song_df["added_at"] = pd.to_datetime(song_df["added_at"])
+                
+                # Convert DataFrames to CSV
+                album_csv = album_df.to_csv(index=False)
+                artist_csv = artist_df.to_csv(index=False)
+                song_csv = song_df.to_csv(index=False)
+                
+                # Generate file names with timestamp
+                file_timestamp = datetime.now().strftime("%Y-%m-%dT%H_%M_%S")
+                album_file_name = f"album_data_{file_timestamp}.csv"
+                artist_file_name = f"artist_data_{file_timestamp}.csv"
+                song_file_name = f"songs_data_{file_timestamp}.csv"
+                
+                # Save transformed data to S3
+                s3_client.put_object(
+                    Bucket=destination_bucket,
+                    Key=f"{destination_album_prefix}{album_file_name}",
+                    Body=album_csv
+                )
+                s3_client.put_object(
+                    Bucket=destination_bucket,
+                    Key=f"{destination_artist_prefix}{artist_file_name}",
+                    Body=artist_csv
+                )
+                s3_client.put_object(
+                    Bucket=destination_bucket,
+                    Key=f"{destination_song_prefix}{song_file_name}",
+                    Body=song_csv
+                )
+                
+                # Move the processed file to the "processed" folder
+                copy_source = {'Bucket': source_bucket, 'Key': source_key}
+                processed_key = source_key.replace(source_prefix, processed_prefix)
+                s3_client.copy_object(CopySource=copy_source, Bucket=source_bucket, Key=processed_key)
+                s3_client.delete_object(Bucket=source_bucket, Key=source_key)
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps('Transformation and load successful')
+        }
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps(f"Error: {str(e)}")
+        }
