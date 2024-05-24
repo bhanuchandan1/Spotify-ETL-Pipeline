@@ -1,0 +1,29 @@
+import json
+import os
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import boto3
+from datetime import datetime
+
+def lambda_handler(event, context):
+    client_id = os.environ['client_id']
+    client_secret = os.environ['client_secret']
+    
+    client_credentials_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
+    sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+    
+    playlist_link = "https://open.spotify.com/playlist/37i9dQZEVXbJiZcmkrIHGU"
+    playlist_URI = playlist_link.split("/")[-1]
+    
+    spotify_data = sp.playlist_tracks(playlist_URI)
+    
+    s3 = boto3.client('s3')
+    bucket_name = 'sporify-etl-project-bhanuchandan'
+    file_name = f"spotify_raw_{datetime.now().strftime('%Y-%m-%dT%H_%M_%S')}.json"
+    
+    s3.put_object(Bucket=bucket_name, Key=f"raw_data/to_processed/{file_name}", Body=json.dumps(spotify_data))
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Data extracted successfully')
+    }
